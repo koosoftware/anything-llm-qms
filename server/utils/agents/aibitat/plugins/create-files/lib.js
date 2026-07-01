@@ -302,6 +302,17 @@ class CreateFilesManager {
   }
 
   /**
+   * Whether generated documents (docx/xlsx/pptx/pdf) should carry the
+   * AnythingLLM "Created with" branding (logo/watermark, footer credit, etc.).
+   * Off by default for this deployment; set ANYTHINGLLM_DOC_BRANDING=true to
+   * restore the upstream behavior.
+   * @returns {boolean}
+   */
+  brandingEnabled() {
+    return process.env.ANYTHINGLLM_DOC_BRANDING === "true";
+  }
+
+  /**
    * Gets the AnythingLLM logo for branding.
    * @param {Object} options
    * @param {boolean} [options.forDarkBackground=false] - True to get light logo (for dark backgrounds), false for dark logo (for light backgrounds)

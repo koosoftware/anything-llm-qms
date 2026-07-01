@@ -93,7 +93,8 @@ module.exports.CreatePdfFile = {
 
               const rawBuffer = await markdownToPdf(content);
               const pdfDoc = await PDFDocument.load(rawBuffer);
-              await applyBranding(pdfDoc, { rgb, StandardFonts });
+              if (createFilesLib.brandingEnabled())
+                await applyBranding(pdfDoc, { rgb, StandardFonts });
 
               const buffer = await pdfDoc.save();
               const bufferSizeKB = (buffer.length / 1024).toFixed(2);

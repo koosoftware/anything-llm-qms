@@ -14,6 +14,8 @@ function isDarkColor(hexColor) {
 }
 
 function addBranding(slide, bgColor) {
+  if (!createFilesLib.brandingEnabled()) return;
+
   const isDark = isDarkColor(bgColor);
   const textColor = isDark ? "FFFFFF" : "000000";
   const logo = createFilesLib.getLogo({
