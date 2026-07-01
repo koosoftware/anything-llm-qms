@@ -91,9 +91,20 @@ class MCPCompatibilityLayer extends MCPHypervisor {
                     aibitat.introspect(
                       `Executing MCP server: ${name} with ${JSON.stringify(args, null, 2)}`
                     );
+                    // Trust boundary: workspace_slug is sourced from the
+                    // authenticated invocation record (server-side), never
+                    // from the LLM. It MUST be assigned after `...args` so it
+                    // always overwrites any workspace_slug the model itself
+                    // may have supplied (e.g. via prompt injection) — do not
+                    // reorder these keys.
+                    const workspaceSlug =
+                      aibitat.handlerProps?.invocation?.workspace?.slug ?? null;
                     const result = await currentMcp.callTool({
                       name: tool.name,
-                      arguments: args,
+                      arguments: {
+                        ...args,
+                        workspace_slug: workspaceSlug,
+                      },
                     });
                     aibitat.handlerProps.log(
                       `MCP server: ${name}:${tool.name} completed successfully`,
