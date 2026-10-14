@@ -285,6 +285,92 @@ class OllamaProvider extends InheritMultiple([Provider, UnTooled]) {
   }
 
   /**
+   * [QMS] Run one native tool-calling chat completion over a stream.
+   * Same behaviour as upstream's inline loop (text chunks and tool calls are
+   * reported through `eventHandler`), but it also collects the `thinking`
+   * stream — which upstream discarded — plus eval_count and done_reason, so
+   * an empty reply can be detected and diagnosed.
+   *
+   * @param {Object} params
+   * @param {Array} params.messages - Messages already formatted for Ollama tools
+   * @param {Array} params.tools - Tools in Ollama format
+   * @param {Function|null} params.eventHandler
+   * @param {string} params.msgUUID
+   * @param {boolean} [params.think] - Ollama `think` option; omitted when undefined (model default)
+   * @returns {Promise<{textResponse: string, thinking: string, toolCalls: Array|null, evalCount: number, doneReason: string|null}>}
+   */
+  async #streamNativeToolChat({
+    messages,
+    tools,
+    eventHandler = null,
+    msgUUID,
+    think = undefined,
+  }) {
+    const stream = await this.client.chat({
+      model: this.model,
+      messages,
+      tools,
+      stream: true,
+      options: this.queryOptions,
+      ...(think === undefined ? {} : { think }),
+    });
+
+    let textResponse = "";
+    let thinking = "";
+    let toolCalls = null;
+    let evalCount = 0;
+    let doneReason = null;
+
+    for await (const chunk of stream) {
+      // Capture usage from final chunk (Ollama sends usage when done=true)
+      if (chunk.done === true) {
+        evalCount = chunk.eval_count || 0;
+        doneReason = chunk.done_reason || null;
+        this.recordUsage({
+          prompt_tokens: chunk.prompt_eval_count || 0,
+          completion_tokens: chunk.eval_count || 0,
+        });
+      }
+
+      if (!chunk?.message) continue;
+
+      if (chunk.message.thinking) thinking += chunk.message.thinking;
+
+      if (chunk.message.content) {
+        textResponse += chunk.message.content;
+        eventHandler?.("reportStreamEvent", {
+          type: "textResponseChunk",
+          uuid: msgUUID,
+          content: chunk.message.content,
+        });
+      }
+
+      if (chunk.message.tool_calls?.length > 0) {
+        toolCalls = chunk.message.tool_calls;
+        eventHandler?.("reportStreamEvent", {
+          uuid: `${msgUUID}:tool_call_invocation`,
+          type: "toolCallInvocation",
+          content: `Tool Call: ${toolCalls[0].function.name}(${JSON.stringify(toolCalls[0].function.arguments)})`,
+        });
+      }
+    }
+
+    return { textResponse, thinking, toolCalls, evalCount, doneReason };
+  }
+
+  /**
+   * [QMS] A turn is "empty" when the model returned no visible text and no tool call.
+   * @param {{textResponse: string, toolCalls: Array|null}} attempt
+   * @returns {boolean}
+   */
+  #isEmptyTurn(attempt) {
+    return (
+      !(attempt.toolCalls && attempt.toolCalls.length > 0) &&
+      attempt.textResponse.trim().length === 0
+    );
+  }
+
+  /**
    * Stream a chat completion with tool calling support.
    * Uses native tool calling when supported, otherwise falls back to the
    * Ollama SDK + UnTooled prompt-based approach.
@@ -308,46 +394,59 @@ class OllamaProvider extends InheritMultiple([Provider, UnTooled]) {
       const formattedMessages = this.#formatMessagesForOllamaTools(messages);
       const tools = formatFunctionsToTools(functions);
 
-      const stream = await this.client.chat({
-        model: this.model,
+      let attempt = await this.#streamNativeToolChat({
         messages: formattedMessages,
         tools,
-        stream: true,
-        options: this.queryOptions,
+        eventHandler,
+        msgUUID,
       });
 
-      let textResponse = "";
-      let toolCalls = null;
-
-      for await (const chunk of stream) {
-        // Capture usage from final chunk (Ollama sends usage when done=true)
-        if (chunk.done === true) {
-          this.recordUsage({
-            prompt_tokens: chunk.prompt_eval_count || 0,
-            completion_tokens: chunk.eval_count || 0,
-          });
+      // [QMS] Empty-reply guard. Thinking models (e.g. Qwen 3.5, thinking on by
+      // default) sometimes put their whole final turn into `thinking` and send
+      // no `content` and no tool call. Upstream then returns "" as a normal
+      // success and the user gets an empty reply. Log what happened and retry
+      // the turn once with thinking off. Disable with
+      // OLLAMA_AGENT_EMPTY_REPLY_RETRY=false.
+      if (this.#isEmptyTurn(attempt)) {
+        const first = attempt;
+        this.providerLog(
+          `[empty-reply] No text and no tool call returned (completion_tokens=${first.evalCount}, thinking_chars=${first.thinking.length}, done_reason=${first.doneReason}).`
+        );
+        if (first.thinking.length > 0) {
+          this.providerLog(
+            `[empty-reply] End of thinking: ${JSON.stringify(first.thinking.slice(-400))}`
+          );
         }
 
-        if (!chunk?.message) continue;
-
-        if (chunk.message.content) {
-          textResponse += chunk.message.content;
-          eventHandler?.("reportStreamEvent", {
-            type: "textResponseChunk",
-            uuid: msgUUID,
-            content: chunk.message.content,
+        if (process.env.OLLAMA_AGENT_EMPTY_REPLY_RETRY !== "false") {
+          this.providerLog("[empty-reply] Retrying once with think=false.");
+          attempt = await this.#streamNativeToolChat({
+            messages: formattedMessages,
+            tools,
+            eventHandler,
+            msgUUID,
+            think: false,
           });
+          this.providerLog(
+            this.#isEmptyTurn(attempt)
+              ? `[empty-reply] Retry also returned no text and no tool call (completion_tokens=${attempt.evalCount}, done_reason=${attempt.doneReason}).`
+              : `[empty-reply] Retry succeeded (text_chars=${attempt.textResponse.length}, tool_call=${attempt.toolCalls?.[0]?.function?.name || "none"}).`
+          );
         }
 
-        if (chunk.message.tool_calls?.length > 0) {
-          toolCalls = chunk.message.tool_calls;
-          eventHandler?.("reportStreamEvent", {
-            uuid: `${msgUUID}:tool_call_invocation`,
-            type: "toolCallInvocation",
-            content: `Tool Call: ${toolCalls[0].function.name}(${JSON.stringify(toolCalls[0].function.arguments)})`,
-          });
-        }
+        // Surfaced in the API response's `metrics`, so evaluations can count retries.
+        this.lastUsage = {
+          ...this.lastUsage,
+          empty_reply_retry: process.env.OLLAMA_AGENT_EMPTY_REPLY_RETRY !== "false",
+          empty_reply_first_attempt: {
+            completion_tokens: first.evalCount,
+            thinking_chars: first.thinking.length,
+            done_reason: first.doneReason,
+          },
+        };
       }
+
+      const { textResponse, toolCalls } = attempt;
 
       if (toolCalls && toolCalls.length > 0) {
         const toolCall = toolCalls[0];

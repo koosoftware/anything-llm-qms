@@ -1,11 +1,13 @@
 How to build docker image
 ----------------------------
-docker buildx build --platform linux/amd64 -f docker/Dockerfile -t koomingchin/anything-llm-qms:v1.15.0.1 .
-docker save -o anything-llm-qms.tar koomingchin/anything-llm-qms:v1.15.0.1
+docker buildx build --platform linux/amd64 -f docker/Dockerfile -t koomingchin/anything-llm-qms:v1.15.0.2 .
+docker save -o anything-llm-qms.tar koomingchin/anything-llm-qms:v1.15.0.2
 docker load -i anything-llm-qms.tar
-docker images
-docker login
-docker push koomingchin/anything-llm-qms:v1.15.0.1
+
+
+v1.15.0.2 (13-Oct-2026)
+------------------------
+- Fix empty reply when thinking is on for QWEN 3.5
 
 
 How to allow Automatic Tool Call Approval to generate documents
